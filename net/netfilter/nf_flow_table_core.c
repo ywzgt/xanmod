@@ -7,7 +7,6 @@
 #include <linux/netdevice.h>
 #include <net/ip.h>
 #include <net/ip6_route.h>
-#include <net/netfilter/nf_tables.h>
 #include <net/netfilter/nf_flow_table.h>
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_core.h>
@@ -314,12 +313,12 @@ int flow_offload_add(struct nf_flowtable *flow_table, struct flow_offload *flow)
 EXPORT_SYMBOL_GPL(flow_offload_add);
 
 void flow_offload_refresh(struct nf_flowtable *flow_table,
-			  struct flow_offload *flow)
+			  struct flow_offload *flow, bool force)
 {
 	u32 timeout;
 
 	timeout = nf_flowtable_time_stamp + flow_offload_get_timeout(flow);
-	if (timeout - READ_ONCE(flow->timeout) > HZ)
+	if (force || timeout - READ_ONCE(flow->timeout) > HZ)
 		WRITE_ONCE(flow->timeout, timeout);
 	else
 		return;
@@ -381,8 +380,7 @@ flow_offload_lookup(struct nf_flowtable *flow_table,
 }
 EXPORT_SYMBOL_GPL(flow_offload_lookup);
 
-static int
-nf_flow_table_iterate(struct nf_flowtable *flow_table,
+int nf_flow_table_iterate(struct nf_flowtable *flow_table,
 		      void (*iter)(struct nf_flowtable *flowtable,
 				   struct flow_offload *flow, void *data),
 		      void *data)
@@ -416,11 +414,18 @@ nf_flow_table_iterate(struct nf_flowtable *flow_table,
 	return err;
 }
 
+static bool nf_flow_custom_gc(struct nf_flowtable *flow_table,
+			      const struct flow_offload *flow)
+{
+	return flow_table->type->gc && flow_table->type->gc(flow);
+}
+
 static void nf_flow_offload_gc_step(struct nf_flowtable *flow_table,
 				    struct flow_offload *flow, void *data)
 {
 	if (nf_flow_has_expired(flow) ||
-	    nf_ct_is_dying(flow->ct))
+	    nf_ct_is_dying(flow->ct) ||
+	    nf_flow_custom_gc(flow_table, flow))
 		flow_offload_teardown(flow);
 
 	if (test_bit(NF_FLOW_TEARDOWN, &flow->flags)) {
@@ -436,6 +441,7 @@ static void nf_flow_offload_gc_step(struct nf_flowtable *flow_table,
 		nf_flow_offload_stats(flow_table, flow);
 	}
 }
+EXPORT_SYMBOL_GPL(nf_flow_table_iterate);
 
 void nf_flow_table_gc_run(struct nf_flowtable *flow_table)
 {

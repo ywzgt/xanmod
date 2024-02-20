@@ -457,7 +457,8 @@ static void tcp_init_sender(struct ip_ct_tcp_state *sender,
 			    const struct sk_buff *skb,
 			    unsigned int dataoff,
 			    const struct tcphdr *tcph,
-			    u32 end, u32 win)
+			    u32 end, u32 win,
+			    enum ip_conntrack_dir dir)
 {
 	/* SYN-ACK in reply to a SYN
 	 * or SYN from reply direction in simultaneous open.
@@ -471,7 +472,8 @@ static void tcp_init_sender(struct ip_ct_tcp_state *sender,
 	 * Both sides must send the Window Scale option
 	 * to enable window scaling in either direction.
 	 */
-	if (!(sender->flags & IP_CT_TCP_FLAG_WINDOW_SCALE &&
+	if (dir == IP_CT_DIR_REPLY &&
+	    !(sender->flags & IP_CT_TCP_FLAG_WINDOW_SCALE &&
 	      receiver->flags & IP_CT_TCP_FLAG_WINDOW_SCALE)) {
 		sender->td_scale = 0;
 		receiver->td_scale = 0;
@@ -542,7 +544,7 @@ tcp_in_window(struct nf_conn *ct, enum ip_conntrack_dir dir,
 		if (tcph->syn) {
 			tcp_init_sender(sender, receiver,
 					skb, dataoff, tcph,
-					end, win);
+					end, win, dir);
 			if (!tcph->ack)
 				/* Simultaneous open */
 				return NFCT_TCP_ACCEPT;
@@ -585,7 +587,7 @@ tcp_in_window(struct nf_conn *ct, enum ip_conntrack_dir dir,
 		 */
 		tcp_init_sender(sender, receiver,
 				skb, dataoff, tcph,
-				end, win);
+				end, win, dir);
 
 		if (dir == IP_CT_DIR_REPLY && !tcph->ack)
 			return NFCT_TCP_ACCEPT;
@@ -1068,6 +1070,13 @@ int nf_conntrack_tcp_packet(struct nf_conn *ct,
 				ct->proto.tcp.last_flags |=
 					IP_CT_EXP_CHALLENGE_ACK;
 		}
+
+		/* possible challenge ack reply to syn */
+		if (old_state == TCP_CONNTRACK_SYN_SENT &&
+		    index == TCP_ACK_SET &&
+		    dir == IP_CT_DIR_REPLY)
+			ct->proto.tcp.last_ack = ntohl(th->ack_seq);
+
 		spin_unlock_bh(&ct->lock);
 		nf_ct_l4proto_log_invalid(skb, ct, state,
 					  "packet (index %d) in dir %d ignored, state %s",
@@ -1193,6 +1202,14 @@ int nf_conntrack_tcp_packet(struct nf_conn *ct,
 			 * segments we ignored. */
 			goto in_window;
 		}
+
+		/* Reset in response to a challenge-ack we let through earlier */
+		if (old_state == TCP_CONNTRACK_SYN_SENT &&
+		    ct->proto.tcp.last_index == TCP_ACK_SET &&
+		    ct->proto.tcp.last_dir == IP_CT_DIR_REPLY &&
+		    ntohl(th->seq) == ct->proto.tcp.last_ack)
+			goto in_window;
+
 		break;
 	default:
 		/* Keep compilers happy. */

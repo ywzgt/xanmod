@@ -63,7 +63,8 @@ bool __ieee80211_recalc_txpower(struct ieee80211_sub_if_data *sdata)
 	if (sdata->deflink.user_power_level != IEEE80211_UNSET_POWER_LEVEL)
 		power = min(power, sdata->deflink.user_power_level);
 
-	if (sdata->deflink.ap_power_level != IEEE80211_UNSET_POWER_LEVEL)
+	if (sdata->deflink.ap_power_level != IEEE80211_UNSET_POWER_LEVEL &&
+	    sdata->vif.bss_conf.txpower_type != NL80211_TX_POWER_FIXED)
 		power = min(power, sdata->deflink.ap_power_level);
 
 	if (power != sdata->vif.bss_conf.txpower) {
@@ -364,7 +365,9 @@ static int ieee80211_check_concurrent_iface(struct ieee80211_sub_if_data *sdata,
 
 			/* No support for VLAN with MLO yet */
 			if (iftype == NL80211_IFTYPE_AP_VLAN &&
-			    nsdata->wdev.use_4addr)
+			    sdata->wdev.use_4addr &&
+			    nsdata->vif.type == NL80211_IFTYPE_AP &&
+			    nsdata->vif.valid_links)
 				return -EOPNOTSUPP;
 
 			/*
@@ -695,7 +698,7 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata, bool going_do
 	ieee80211_recalc_ps(local);
 
 	if (cancel_scan)
-		flush_delayed_work(&local->scan_work);
+		wiphy_delayed_work_flush(local->hw.wiphy, &local->scan_work);
 
 	if (local->open_count == 0) {
 		ieee80211_stop_device(local);

@@ -283,8 +283,18 @@ dev_t name_to_dev_t(const char *name)
 	if (strcmp(name, "/dev/ram") == 0)
 		return Root_RAM0;
 #ifdef CONFIG_BLOCK
-	if (strncmp(name, "PARTUUID=", 9) == 0)
-		return devt_from_partuuid(name + 9);
+	if (strncmp(name, "PARTUUID=", 9) == 0) {
+		dev_t res;
+		int  needtowait = 40<<1;
+		res = devt_from_partuuid(name + 9);
+		while (!res && needtowait) {
+			/* waiting 0.5 sec */
+			msleep(500);
+			res = devt_from_partuuid(name + 9);
+			needtowait--;
+		}
+		return res;
+	}
 	if (strncmp(name, "PARTLABEL=", 10) == 0)
 		return devt_from_partlabel(name + 10);
 	if (strncmp(name, "/dev/", 5) == 0)
@@ -612,7 +622,9 @@ void __init prepare_namespace(void)
 	 * For example, it is not atypical to wait 5 seconds here
 	 * for the touchpad of a laptop to initialize.
 	 */
+	async_synchronize_full();
 	wait_for_device_probe();
+	async_synchronize_full();
 
 	md_run_setup();
 
@@ -665,7 +677,10 @@ struct file_system_type rootfs_fs_type = {
 
 void __init init_rootfs(void)
 {
-	if (IS_ENABLED(CONFIG_TMPFS) && !saved_root_name[0] &&
-		(!root_fs_names || strstr(root_fs_names, "tmpfs")))
-		is_tmpfs = true;
+	if (IS_ENABLED(CONFIG_TMPFS)) {
+		if (!saved_root_name[0] && !root_fs_names)
+			is_tmpfs = true;
+		else if (root_fs_names && !!strstr(root_fs_names, "tmpfs"))
+			is_tmpfs = true;
+	}
 }

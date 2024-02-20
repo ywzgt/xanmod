@@ -257,6 +257,8 @@ static void rcu_preempt_ctxt_queue(struct rcu_node *rnp, struct rcu_data *rdp)
 	 * GP should not be able to end until we report, so there should be
 	 * no need to check for a subsequent expedited GP.  (Though we are
 	 * still in a quiescent state in any case.)
+	 *
+	 * Interrupts are disabled, so ->cpu_no_qs.b.exp cannot change.
 	 */
 	if (blkd_state & RCU_EXP_BLKD && rdp->cpu_no_qs.b.exp)
 		rcu_report_exp_rdp(rdp);
@@ -941,7 +943,7 @@ notrace void rcu_preempt_deferred_qs(struct task_struct *t)
 {
 	struct rcu_data *rdp = this_cpu_ptr(&rcu_data);
 
-	if (rdp->cpu_no_qs.b.exp)
+	if (READ_ONCE(rdp->cpu_no_qs.b.exp))
 		rcu_report_exp_rdp(rdp);
 }
 
@@ -1007,7 +1009,7 @@ static void rcu_cpu_kthread_setup(unsigned int cpu)
 	struct sched_param sp;
 
 	sp.sched_priority = kthread_prio;
-	sched_setscheduler_nocheck(current, SCHED_FIFO, &sp);
+	sched_setscheduler_nocheck(current, SCHED_RR, &sp);
 #endif /* #ifdef CONFIG_RCU_BOOST */
 
 	WRITE_ONCE(rdp->rcuc_activity, jiffies);
@@ -1206,7 +1208,7 @@ static void rcu_spawn_one_boost_kthread(struct rcu_node *rnp)
 	rnp->boost_kthread_task = t;
 	raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
 	sp.sched_priority = kthread_prio;
-	sched_setscheduler_nocheck(t, SCHED_FIFO, &sp);
+	sched_setscheduler_nocheck(t, SCHED_RR, &sp);
 	wake_up_process(t); /* get to TASK_INTERRUPTIBLE quickly. */
 
  out:

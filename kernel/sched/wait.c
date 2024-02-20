@@ -47,6 +47,17 @@ void add_wait_queue_priority(struct wait_queue_head *wq_head, struct wait_queue_
 }
 EXPORT_SYMBOL_GPL(add_wait_queue_priority);
 
+void add_wait_queue_exclusive_lifo(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry)
+{
+	unsigned long flags;
+
+	wq_entry->flags |= WQ_FLAG_EXCLUSIVE;
+	spin_lock_irqsave(&wq_head->lock, flags);
+	__add_wait_queue(wq_head, wq_entry);
+	spin_unlock_irqrestore(&wq_head->lock, flags);
+}
+EXPORT_SYMBOL(add_wait_queue_exclusive_lifo);
+
 void remove_wait_queue(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry)
 {
 	unsigned long flags;
@@ -121,11 +132,12 @@ static int __wake_up_common(struct wait_queue_head *wq_head, unsigned int mode,
 	return nr_exclusive;
 }
 
-static void __wake_up_common_lock(struct wait_queue_head *wq_head, unsigned int mode,
+static int __wake_up_common_lock(struct wait_queue_head *wq_head, unsigned int mode,
 			int nr_exclusive, int wake_flags, void *key)
 {
 	unsigned long flags;
 	wait_queue_entry_t bookmark;
+	int remaining = nr_exclusive;
 
 	bookmark.flags = 0;
 	bookmark.private = NULL;
@@ -134,10 +146,12 @@ static void __wake_up_common_lock(struct wait_queue_head *wq_head, unsigned int 
 
 	do {
 		spin_lock_irqsave(&wq_head->lock, flags);
-		nr_exclusive = __wake_up_common(wq_head, mode, nr_exclusive,
+		remaining = __wake_up_common(wq_head, mode, remaining,
 						wake_flags, key, &bookmark);
 		spin_unlock_irqrestore(&wq_head->lock, flags);
 	} while (bookmark.flags & WQ_FLAG_BOOKMARK);
+
+	return nr_exclusive - remaining;
 }
 
 /**
@@ -147,13 +161,14 @@ static void __wake_up_common_lock(struct wait_queue_head *wq_head, unsigned int 
  * @nr_exclusive: how many wake-one or wake-many threads to wake up
  * @key: is directly passed to the wakeup function
  *
- * If this function wakes up a task, it executes a full memory barrier before
- * accessing the task state.
+ * If this function wakes up a task, it executes a full memory barrier
+ * before accessing the task state.  Returns the number of exclusive
+ * tasks that were awaken.
  */
-void __wake_up(struct wait_queue_head *wq_head, unsigned int mode,
-			int nr_exclusive, void *key)
+int __wake_up(struct wait_queue_head *wq_head, unsigned int mode,
+	      int nr_exclusive, void *key)
 {
-	__wake_up_common_lock(wq_head, mode, nr_exclusive, 0, key);
+	return __wake_up_common_lock(wq_head, mode, nr_exclusive, 0, key);
 }
 EXPORT_SYMBOL(__wake_up);
 
@@ -243,6 +258,7 @@ void __wake_up_pollfree(struct wait_queue_head *wq_head)
 	/* POLLFREE must have cleared the queue. */
 	WARN_ON_ONCE(waitqueue_active(wq_head));
 }
+EXPORT_SYMBOL_GPL(__wake_up_pollfree);
 
 /*
  * Note: we use "set_current_state()" _after_ the wait-queue add,
@@ -288,6 +304,19 @@ prepare_to_wait_exclusive(struct wait_queue_head *wq_head, struct wait_queue_ent
 	return was_empty;
 }
 EXPORT_SYMBOL(prepare_to_wait_exclusive);
+
+void prepare_to_wait_exclusive_lifo(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry, int state)
+{
+	unsigned long flags;
+
+	wq_entry->flags |= WQ_FLAG_EXCLUSIVE;
+	spin_lock_irqsave(&wq_head->lock, flags);
+	if (list_empty(&wq_entry->entry))
+		__add_wait_queue(wq_head, wq_entry);
+	set_current_state(state);
+	spin_unlock_irqrestore(&wq_head->lock, flags);
+}
+EXPORT_SYMBOL(prepare_to_wait_exclusive_lifo);
 
 void init_wait_entry(struct wait_queue_entry *wq_entry, int flags)
 {
