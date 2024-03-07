@@ -1,0 +1,50 @@
+#!/bin/bash
+
+set -e
+
+if [[ $1 = [0-9].[0-9]* ]]; then
+	major="$1"
+else
+	echo "::Major must be set ! "
+	exit 1
+fi
+
+if [[ $(hostname) = fv-az*-* ]]; then
+	git config --global user.name "github-actions"
+	git config --global user.email "action@github.com"
+fi
+
+git config remote.origin.fetch "+refs/heads/${major}:refs/remotes/origin/${major}"
+git fetch origin ${major}
+git checkout ${major}
+
+out=$(mktemp -d)
+make O=$out olddefconfig
+old_version=$(make -s O=$out kernelversion)
+new_version=$(curl -sL kernel.org|grep -o "https://.*/linux-${major}.[0-9]\+\.tar.xz"|head -1|sed 's/^.*linux-\|.tar.xz//g')
+
+if [[ ${old_version} && ${new_version} ]]; then
+	if ! (( ${new_version#$major.} > ${old_version#$major.} )); then
+		echo "::No update for $major"
+		exit 0
+	fi
+else
+	echo "::Version Error ! "
+	exit 1
+fi
+
+PATCH_FILE="patch-${major}.${old_version#$major.}-${new_version#$major.}.xz"
+wget -nv -P .. "https://cdn.kernel.org/pub/linux/kernel/v${major::1}.x/incr/${PATCH_FILE}"
+unxz ../${PATCH_FILE}
+patch -Np1 -i ../${PATCH_FILE%.xz}
+
+git add .
+git commit -m "Merge tag 'v${new_version}' into ${major}"
+git push origin ${major}
+
+release_version=$(make -s O=$out kernelrelease)
+git diff $(git log --format='%h'|tail -1) > patch-${release_version}
+xz -9 patch-${release_version}
+
+echo "TAG_VERSION=$release_version" >> $GITHUB_ENV
+echo "TAG_DES=https://cdn.kernel.org/pub/linux/kernel/v${major::1}.x/ChangeLog-$new_version" >> $GITHUB_ENV
