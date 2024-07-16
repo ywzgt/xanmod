@@ -1,0 +1,30 @@
+name: Generate xanmod patch
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '5 0 */2 * *'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    - name: Run script
+      run: bash update 6.1
+    - name: Upload to Releases
+      if: ${{ env.TAG_VERSION != '' }}
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ env.TAG_VERSION }}
+        body: ${{ env.TAG_DES }}
+        files: patch-*.xz
+        fail_on_unmatched_files: true
+    - name: Gh login
+      if: ${{ failure() }}
+      run: echo ${{ secrets.GITHUB_TOKEN }} | gh auth login --with-token; gh auth setup-git; gh auth status
+    - name: Setup tmate ssh session
+      if: ${{ failure() }}
+      uses: mxschmitt/action-tmate@v3
+      with:
+        limit-access-to-actor: true
