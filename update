@@ -9,7 +9,7 @@ else
 	exit 1
 fi
 
-if [[ $(hostname) = fv-az*-* ]]; then
+if [[ $(hostname) = fv-az*-* ]] || [[ $GITHUB_ACTIONS = true ]]; then
 	git config --global user.name "github-actions"
 	git config --global user.email "action@github.com"
 fi
