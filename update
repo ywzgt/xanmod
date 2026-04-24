@@ -38,7 +38,7 @@ wget -nv -P .. "https://cdn.kernel.org/pub/linux/kernel/v${major::1}.x/incr/${PA
 unxz ../${PATCH_FILE}
 patch -Np1 -i ../${PATCH_FILE%.xz}
 
-git add .
+find . -type f -name \*.orig -delete && git add .
 git commit -m "Merge tag 'v${new_version}' into ${major}"
 git push origin ${major}
 
