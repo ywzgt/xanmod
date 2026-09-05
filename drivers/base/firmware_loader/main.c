@@ -471,6 +471,8 @@ static int fw_decompress_xz(struct device *dev, struct fw_priv *fw_priv,
 static char fw_path_para[256];
 static const char * const fw_path[] = {
 	fw_path_para,
+	"/etc/firmware/" UTS_RELEASE,
+	"/etc/firmware",
 	"/lib/firmware/updates/" UTS_RELEASE,
 	"/lib/firmware/updates",
 	"/lib/firmware/" UTS_RELEASE,
@@ -829,19 +831,18 @@ static void fw_log_firmware_info(const struct firmware *fw, const char *name, st
 	shash->tfm = alg;
 
 	if (crypto_shash_digest(shash, fw->data, fw->size, sha256buf) < 0)
-		goto out_shash;
+		goto out_free;
 
 	for (int i = 0; i < SHA256_DIGEST_SIZE; i++)
 		sprintf(&outbuf[i * 2], "%02x", sha256buf[i]);
 	outbuf[SHA256_BLOCK_SIZE] = 0;
 	dev_dbg(device, "Loaded FW: %s, sha256: %s\n", name, outbuf);
 
-out_shash:
-	crypto_free_shash(alg);
 out_free:
 	kfree(shash);
 	kfree(outbuf);
 	kfree(sha256buf);
+	crypto_free_shash(alg);
 }
 #else
 static void fw_log_firmware_info(const struct firmware *fw, const char *name,

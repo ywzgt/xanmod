@@ -4,7 +4,8 @@
  * Auto-group scheduling implementation:
  */
 
-unsigned int __read_mostly sysctl_sched_autogroup_enabled = 1;
+unsigned int __read_mostly sysctl_sched_autogroup_enabled =
+		IS_ENABLED(CONFIG_SCHED_AUTOGROUP_DEFAULT_ENABLED) ? 1 : 0;
 static struct autogroup autogroup_default;
 static atomic_t autogroup_seq_nr;
 
@@ -150,7 +151,7 @@ void sched_autogroup_exit_task(struct task_struct *p)
 	 * see this thread after that: we can no longer use signal->autogroup.
 	 * See the PF_EXITING check in task_wants_autogroup().
 	 */
-	sched_move_task(p);
+	sched_move_task(p, true);
 }
 
 static void
@@ -182,7 +183,7 @@ autogroup_move_group(struct task_struct *p, struct autogroup *ag)
 	 * sched_autogroup_exit_task().
 	 */
 	for_each_thread(p, t)
-		sched_move_task(t);
+		sched_move_task(t, true);
 
 	unlock_task_sighand(p, &flags);
 	autogroup_kref_put(prev);
@@ -219,11 +220,13 @@ void sched_autogroup_exit(struct signal_struct *sig)
 
 static int __init setup_autogroup(char *str)
 {
-	sysctl_sched_autogroup_enabled = 0;
+	unsigned long enabled;
+	if (!kstrtoul(str, 0, &enabled))
+		sysctl_sched_autogroup_enabled = enabled ? 1 : 0;
 
 	return 1;
 }
-__setup("noautogroup", setup_autogroup);
+__setup("autogroup=", setup_autogroup);
 
 #ifdef CONFIG_PROC_FS
 

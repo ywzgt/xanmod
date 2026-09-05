@@ -140,6 +140,7 @@ int can_nice(const struct task_struct *p, const int nice)
 {
 	return is_nice_reduction(p, nice) || capable(CAP_SYS_NICE);
 }
+EXPORT_SYMBOL(can_nice);
 
 #ifdef __ARCH_WANT_SYS_NICE
 
@@ -1238,7 +1239,7 @@ int __sched_setaffinity(struct task_struct *p, struct affinity_context *ctx)
 			bool empty = !cpumask_and(new_mask, new_mask,
 						  ctx->user_mask);
 
-			if (WARN_ON_ONCE(empty))
+			if (empty)
 				cpumask_copy(new_mask, cpus_allowed);
 		}
 		__set_cpus_allowed_ptr(p, ctx);
@@ -1390,15 +1391,29 @@ SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
 	return ret;
 }
 
+/**
+ * sysctl_sched_yield_type - choose the yield level that will perform.
+ *
+ * 0: No yield.
+ * 1: Yield only to better priority/deadline tasks.
+ * 2: Re-queue current tasks. (default CFS)
+ */
+__read_mostly int sysctl_sched_yield_type = 2;
+
 static void do_sched_yield(void)
 {
 	struct rq_flags rf;
 	struct rq *rq;
 
+	if (!sysctl_sched_yield_type)
+		return;
+
 	rq = this_rq_lock_irq(&rf);
 
 	schedstat_inc(rq->yld_count);
-	current->sched_class->yield_task(rq);
+
+	if (sysctl_sched_yield_type > 1)
+		current->sched_class->yield_task(rq);
 
 	preempt_disable();
 	rq_unlock_irq(rq, &rf);
@@ -1471,7 +1486,7 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	struct rq *rq, *p_rq;
 	int yielded = 0;
 
-	scoped_guard (irqsave) {
+	scoped_guard (raw_spinlock_irqsave, &p->pi_lock) {
 		rq = this_rq();
 
 again:

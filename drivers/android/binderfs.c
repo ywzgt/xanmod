@@ -122,7 +122,7 @@ static int binderfs_binder_device_create(struct inode *ref_inode,
 	struct super_block *sb = ref_inode->i_sb;
 	struct binderfs_info *info = sb->s_fs_info;
 #if defined(CONFIG_IPC_NS)
-	bool use_reserve = (info->ipc_ns == &init_ipc_ns);
+	bool use_reserve = (info->ipc_ns == show_init_ipc_ns());
 #else
 	bool use_reserve = true;
 #endif
@@ -131,8 +131,8 @@ static int binderfs_binder_device_create(struct inode *ref_inode,
 	mutex_lock(&binderfs_minors_mutex);
 	if (++info->device_count <= info->mount_opts.max)
 		minor = ida_alloc_max(&binderfs_minors,
-				      use_reserve ? BINDERFS_MAX_MINOR :
-						    BINDERFS_MAX_MINOR_CAPPED,
+				      use_reserve ? BINDERFS_MAX_MINOR - 1 :
+						    BINDERFS_MAX_MINOR_CAPPED - 1,
 				      GFP_KERNEL);
 	else
 		minor = -ENOSPC;
@@ -399,7 +399,7 @@ static int binderfs_binder_ctl_create(struct super_block *sb)
 	struct dentry *root = sb->s_root;
 	struct binderfs_info *info = sb->s_fs_info;
 #if defined(CONFIG_IPC_NS)
-	bool use_reserve = (info->ipc_ns == &init_ipc_ns);
+	bool use_reserve = (info->ipc_ns == show_init_ipc_ns());
 #else
 	bool use_reserve = true;
 #endif
@@ -422,8 +422,8 @@ static int binderfs_binder_ctl_create(struct super_block *sb)
 	/* Reserve a new minor number for the new device. */
 	mutex_lock(&binderfs_minors_mutex);
 	minor = ida_alloc_max(&binderfs_minors,
-			      use_reserve ? BINDERFS_MAX_MINOR :
-					    BINDERFS_MAX_MINOR_CAPPED,
+			      use_reserve ? BINDERFS_MAX_MINOR - 1 :
+					    BINDERFS_MAX_MINOR_CAPPED - 1,
 			      GFP_KERNEL);
 	mutex_unlock(&binderfs_minors_mutex);
 	if (minor < 0) {
@@ -691,7 +691,7 @@ static int binderfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -ENOMEM;
 	info = sb->s_fs_info;
 
-	info->ipc_ns = get_ipc_ns(current->nsproxy->ipc_ns);
+	info->ipc_ns = get_ipc_ns_exported(current->nsproxy->ipc_ns);
 
 	info->root_gid = make_kgid(sb->s_user_ns, 0);
 	if (!gid_valid(info->root_gid))

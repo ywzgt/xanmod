@@ -265,11 +265,14 @@ static u16 tcp_select_window(struct sock *sk)
 	u32 cur_win, new_win;
 
 	/* Make the window 0 if we failed to queue the data because we
-	 * are out of memory. The window is temporary, so we don't store
-	 * it on the socket.
+	 * are out of memory.
 	 */
-	if (unlikely(inet_csk(sk)->icsk_ack.pending & ICSK_ACK_NOMEM))
+	if (unlikely(inet_csk(sk)->icsk_ack.pending & ICSK_ACK_NOMEM)) {
+		tp->pred_flags = 0;
+		tp->rcv_wnd = 0;
+		tp->rcv_wup = tp->rcv_nxt;
 		return 0;
+	}
 
 	cur_win = tcp_receive_window(tp);
 	new_win = __tcp_select_window(sk);
@@ -336,10 +339,9 @@ static void tcp_ecn_send_syn(struct sock *sk, struct sk_buff *skb)
 	bool bpf_needs_ecn = tcp_bpf_ca_needs_ecn(sk);
 	bool use_ecn = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_ecn) == 1 ||
 		tcp_ca_needs_ecn(sk) || bpf_needs_ecn;
+	const struct dst_entry *dst = __sk_dst_get(sk);
 
 	if (!use_ecn) {
-		const struct dst_entry *dst = __sk_dst_get(sk);
-
 		if (dst && dst_feature(dst, RTAX_FEATURE_ECN))
 			use_ecn = true;
 	}
@@ -351,6 +353,9 @@ static void tcp_ecn_send_syn(struct sock *sk, struct sk_buff *skb)
 		tp->ecn_flags = TCP_ECN_OK;
 		if (tcp_ca_needs_ecn(sk) || bpf_needs_ecn)
 			INET_ECN_xmit(sk);
+
+		if (dst)
+			tcp_set_ecn_low_from_dst(sk, dst);
 	}
 }
 
@@ -388,7 +393,8 @@ static void tcp_ecn_send(struct sock *sk, struct sk_buff *skb,
 				th->cwr = 1;
 				skb_shinfo(skb)->gso_type |= SKB_GSO_TCP_ECN;
 			}
-		} else if (!tcp_ca_needs_ecn(sk)) {
+		} else if (!(tp->ecn_flags & TCP_ECN_ECT_PERMANENT) &&
+			!tcp_ca_needs_ecn(sk)) {
 			/* ACK or retransmitted segment: clear ECT|CE */
 			INET_ECN_dontxmit(sk);
 		}
@@ -883,8 +889,10 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 		unsigned int size;
 
 		if (mptcp_syn_options(sk, skb, &size, &opts->mptcp)) {
-			opts->options |= OPTION_MPTCP;
-			remaining -= size;
+			if (remaining >= size) {
+				opts->options |= OPTION_MPTCP;
+				remaining -= size;
+			}
 		}
 	}
 
@@ -1601,7 +1609,7 @@ int tcp_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *buff;
-	int old_factor;
+	int old_factor, inflight_prev;
 	long limit;
 	int nlen;
 	u8 flags;
@@ -1676,6 +1684,30 @@ int tcp_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 
 		if (diff)
 			tcp_adjust_pcount(sk, skb, diff);
+
+		inflight_prev = TCP_SKB_CB(skb)->tx.in_flight - old_factor;
+		if (inflight_prev < 0) {
+			WARN_ONCE(tcp_skb_tx_in_flight_is_suspicious(
+					  old_factor,
+					  TCP_SKB_CB(skb)->sacked,
+					  TCP_SKB_CB(skb)->tx.in_flight),
+				  "inconsistent: tx.in_flight: %u "
+				  "old_factor: %d mss: %u sacked: %u "
+				  "1st pcount: %d 2nd pcount: %d "
+				  "1st len: %u 2nd len: %u ",
+				  TCP_SKB_CB(skb)->tx.in_flight, old_factor,
+				  mss_now, TCP_SKB_CB(skb)->sacked,
+				  tcp_skb_pcount(skb), tcp_skb_pcount(buff),
+				  skb->len, buff->len);
+			inflight_prev = 0;
+		}
+		/* Set 1st tx.in_flight as if 1st were sent by itself: */
+		TCP_SKB_CB(skb)->tx.in_flight = inflight_prev +
+						 tcp_skb_pcount(skb);
+		/* Set 2nd tx.in_flight with new 1st and 2nd pcounts: */
+		TCP_SKB_CB(buff)->tx.in_flight = inflight_prev +
+						 tcp_skb_pcount(skb) +
+						 tcp_skb_pcount(buff);
 	}
 
 	/* Link BUFF into the send queue. */
@@ -2033,13 +2065,12 @@ static u32 tcp_tso_autosize(const struct sock *sk, unsigned int mss_now,
 static u32 tcp_tso_segs(struct sock *sk, unsigned int mss_now)
 {
 	const struct tcp_congestion_ops *ca_ops = inet_csk(sk)->icsk_ca_ops;
-	u32 min_tso, tso_segs;
+	u32 tso_segs;
 
-	min_tso = ca_ops->min_tso_segs ?
-			ca_ops->min_tso_segs(sk) :
-			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_min_tso_segs);
-
-	tso_segs = tcp_tso_autosize(sk, mss_now, min_tso);
+	tso_segs = ca_ops->tso_segs ?
+		ca_ops->tso_segs(sk, mss_now) :
+		tcp_tso_autosize(sk, mss_now,
+				 sock_net(sk)->ipv4.sysctl_tcp_min_tso_segs);
 	return min_t(u32, tso_segs, sk->sk_gso_max_segs);
 }
 
@@ -2212,7 +2243,8 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 				 u32 max_segs)
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
-	u32 send_win, cong_win, limit, in_flight;
+	u32 send_win, cong_win, limit, in_flight, threshold;
+	u64 srtt_in_ns, expected_ack, how_far_is_the_ack;
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *head;
 	int win_divisor;
@@ -2274,9 +2306,19 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 	head = tcp_rtx_queue_head(sk);
 	if (!head)
 		goto send_now;
-	delta = tp->tcp_clock_cache - head->tstamp;
-	/* If next ACK is likely to come too late (half srtt), do not defer */
-	if ((s64)(delta - (u64)NSEC_PER_USEC * (tp->srtt_us >> 4)) < 0)
+
+	srtt_in_ns = (u64)(NSEC_PER_USEC >> 3) * tp->srtt_us;
+	/* When is the ACK expected ? */
+	expected_ack = head->tstamp + srtt_in_ns;
+	/* How far from now is the ACK expected ? */
+	how_far_is_the_ack = expected_ack - tp->tcp_clock_cache;
+
+	/* If next ACK is likely to come too late,
+	 * ie in more than min(1ms, half srtt), do not defer.
+	 */
+	threshold = min(srtt_in_ns >> 1, NSEC_PER_MSEC);
+
+	if ((s64)(how_far_is_the_ack - threshold) > 0)
 		goto send_now;
 
 	/* Ok, it looks like it is advisable to defer.
@@ -2765,6 +2807,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			skb_set_delivery_time(skb, tp->tcp_wstamp_ns, SKB_CLOCK_MONOTONIC);
 			list_move_tail(&skb->tcp_tsorted_anchor, &tp->tsorted_sent_queue);
 			tcp_init_tso_segs(skb, mss_now);
+			tcp_set_tx_in_flight(sk, skb);
 			goto repair; /* Skip network transmission */
 		}
 
@@ -2979,6 +3022,7 @@ void tcp_send_loss_probe(struct sock *sk)
 	if (WARN_ON(!skb || !tcp_skb_pcount(skb)))
 		goto rearm_timer;
 
+	tp->tlp_orig_data_app_limited = TCP_SKB_CB(skb)->tx.is_app_limited;
 	if (__tcp_retransmit_skb(sk, skb, 1))
 		goto rearm_timer;
 

@@ -634,7 +634,7 @@ static int inet_csk_wait_for_connect(struct sock *sk, long timeo)
 	 * having to remove and re-insert us on the wait queue.
 	 */
 	for (;;) {
-		prepare_to_wait_exclusive(sk_sleep(sk), &wait,
+		prepare_to_wait_exclusive_lifo(sk_sleep(sk), &wait,
 					  TASK_INTERRUPTIBLE);
 		release_sock(sk);
 		if (reqsk_queue_empty(&icsk->icsk_accept_queue))
@@ -1189,7 +1189,7 @@ no_ownership:
 
 drop:
 	__inet_csk_reqsk_queue_drop(sk_listener, oreq, true);
-	reqsk_put(req);
+	reqsk_put(oreq);
 }
 
 static bool reqsk_queue_hash_req(struct request_sock *req,

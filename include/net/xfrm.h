@@ -184,10 +184,13 @@ struct xfrm_state {
 	};
 	struct hlist_node	byspi;
 	struct hlist_node	byseq;
+	struct hlist_node	state_cache;
+	struct hlist_node	state_cache_input;
 
 	refcount_t		refcnt;
 	spinlock_t		lock;
 
+	u32			pcpu_num;
 	struct xfrm_id		id;
 	struct xfrm_selector	sel;
 	struct xfrm_mark	mark;
@@ -230,7 +233,6 @@ struct xfrm_state {
 
 	/* Data for encapsulator */
 	struct xfrm_encap_tmpl	*encap;
-	struct sock __rcu	*encap_sk;
 
 	/* NAT keepalive */
 	u32			nat_keepalive_interval; /* seconds */
@@ -422,7 +424,6 @@ int xfrm_input_register_afinfo(const struct xfrm_input_afinfo *afinfo);
 int xfrm_input_unregister_afinfo(const struct xfrm_input_afinfo *afinfo);
 
 void xfrm_flush_gc(void);
-void xfrm_state_delete_tunnel(struct xfrm_state *x);
 
 struct xfrm_type {
 	struct module		*owner;
@@ -470,7 +471,8 @@ static inline int xfrm_af2proto(unsigned int family)
 
 static inline const struct xfrm_mode *xfrm_ip2inner_mode(struct xfrm_state *x, int ipproto)
 {
-	if ((ipproto == IPPROTO_IPIP && x->props.family == AF_INET) ||
+	if ((x->sel.family != AF_UNSPEC) ||
+	    (ipproto == IPPROTO_IPIP && x->props.family == AF_INET) ||
 	    (ipproto == IPPROTO_IPV6 && x->props.family == AF_INET6))
 		return &x->inner_mode;
 	else
@@ -536,6 +538,7 @@ struct xfrm_policy_queue {
  *	@xp_net: network namespace the policy lives in
  *	@bydst: hlist node for SPD hash table or rbtree list
  *	@byidx: hlist node for index hash table
+ *	@state_cache_list: hlist head for policy cached xfrm states
  *	@lock: serialize changes to policy structure members
  *	@refcnt: reference count, freed once it reaches 0
  *	@pos: kernel internal tie-breaker to determine age of policy
@@ -565,6 +568,8 @@ struct xfrm_policy {
 	possible_net_t		xp_net;
 	struct hlist_node	bydst;
 	struct hlist_node	byidx;
+
+	struct hlist_head	state_cache_list;
 
 	/* This lock only affects elements except for entry. */
 	rwlock_t		lock;
@@ -846,7 +851,7 @@ static inline void xfrm_pols_put(struct xfrm_policy **pols, int npols)
 		xfrm_pol_put(pols[i]);
 }
 
-void __xfrm_state_destroy(struct xfrm_state *, bool);
+void __xfrm_state_destroy(struct xfrm_state *);
 
 static inline void __xfrm_state_put(struct xfrm_state *x)
 {
@@ -856,13 +861,7 @@ static inline void __xfrm_state_put(struct xfrm_state *x)
 static inline void xfrm_state_put(struct xfrm_state *x)
 {
 	if (refcount_dec_and_test(&x->refcnt))
-		__xfrm_state_destroy(x, false);
-}
-
-static inline void xfrm_state_put_sync(struct xfrm_state *x)
-{
-	if (refcount_dec_and_test(&x->refcnt))
-		__xfrm_state_destroy(x, true);
+		__xfrm_state_destroy(x);
 }
 
 static inline void xfrm_state_hold(struct xfrm_state *x)
@@ -1217,9 +1216,19 @@ static inline int __xfrm_policy_check2(struct sock *sk, int dir,
 
 	if (xo) {
 		x = xfrm_input_state(skb);
-		if (x->xso.type == XFRM_DEV_OFFLOAD_PACKET)
-			return (xo->flags & CRYPTO_DONE) &&
-			       (xo->status & CRYPTO_SUCCESS);
+		if (x->xso.type == XFRM_DEV_OFFLOAD_PACKET) {
+			bool check = (xo->flags & CRYPTO_DONE) &&
+				     (xo->status & CRYPTO_SUCCESS);
+
+			/* The packets here are plain ones and secpath was
+			 * needed to indicate that hardware already handled
+			 * them and there is no need to do nothing in addition.
+			 *
+			 * Consume secpath which was set by drivers.
+			 */
+			secpath_reset(skb);
+			return check;
+		}
 	}
 
 	return __xfrm_check_nopolicy(net, skb, dir) ||
@@ -1645,6 +1654,10 @@ int xfrm_state_update(struct xfrm_state *x);
 struct xfrm_state *xfrm_state_lookup(struct net *net, u32 mark,
 				     const xfrm_address_t *daddr, __be32 spi,
 				     u8 proto, unsigned short family);
+struct xfrm_state *xfrm_input_state_lookup(struct net *net, u32 mark,
+					   const xfrm_address_t *daddr,
+					   __be32 spi, u8 proto,
+					   unsigned short family);
 struct xfrm_state *xfrm_state_lookup_byaddr(struct net *net, u32 mark,
 					    const xfrm_address_t *daddr,
 					    const xfrm_address_t *saddr,
@@ -1684,9 +1697,9 @@ struct xfrmk_spdinfo {
 	u32 spdhmcnt;
 };
 
-struct xfrm_state *xfrm_find_acq_byseq(struct net *net, u32 mark, u32 seq);
+struct xfrm_state *xfrm_find_acq_byseq(struct net *net, u32 mark, u32 seq, u32 pcpu_num);
 int xfrm_state_delete(struct xfrm_state *x);
-int xfrm_state_flush(struct net *net, u8 proto, bool task_valid, bool sync);
+int xfrm_state_flush(struct net *net, u8 proto, bool task_valid);
 int xfrm_dev_state_flush(struct net *net, struct net_device *dev, bool task_valid);
 int xfrm_dev_policy_flush(struct net *net, struct net_device *dev,
 			  bool task_valid);
@@ -1796,7 +1809,7 @@ int verify_spi_info(u8 proto, u32 min, u32 max, struct netlink_ext_ack *extack);
 int xfrm_alloc_spi(struct xfrm_state *x, u32 minspi, u32 maxspi,
 		   struct netlink_ext_ack *extack);
 struct xfrm_state *xfrm_find_acq(struct net *net, const struct xfrm_mark *mark,
-				 u8 mode, u32 reqid, u32 if_id, u8 proto,
+				 u8 mode, u32 reqid, u32 if_id, u32 pcpu_num, u8 proto,
 				 const xfrm_address_t *daddr,
 				 const xfrm_address_t *saddr, int create,
 				 unsigned short family);

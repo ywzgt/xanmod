@@ -47,15 +47,15 @@ nfsd_open_local_fh(struct net *, struct auth_domain *, struct rpc_clnt *,
 		   const fmode_t) __must_hold(rcu);
 
 struct nfsd_localio_operations {
-	bool (*nfsd_serv_try_get)(struct net *);
-	void (*nfsd_serv_put)(struct net *);
+	bool (*nfsd_net_try_get)(struct net *);
+	void (*nfsd_net_put)(struct net *);
 	struct nfsd_file *(*nfsd_open_local_fh)(struct net *,
 						struct auth_domain *,
 						struct rpc_clnt *,
 						const struct cred *,
 						const struct nfs_fh *,
 						const fmode_t);
-	void (*nfsd_file_put_local)(struct nfsd_file *);
+	struct net *(*nfsd_file_put_local)(struct nfsd_file *);
 	struct file *(*nfsd_file_file)(struct nfsd_file *);
 } ____cacheline_aligned;
 
@@ -66,16 +66,28 @@ struct nfsd_file *nfs_open_local_fh(nfs_uuid_t *,
 		   struct rpc_clnt *, const struct cred *,
 		   const struct nfs_fh *, const fmode_t);
 
+static inline void nfs_to_nfsd_net_put(struct net *net)
+{
+	/*
+	 * Once reference to net (and associated nfsd_serv) is dropped, NFSD
+	 * could be unloaded, so ensure safe return from nfsd_net_put() by
+	 * always taking RCU.
+	 */
+	rcu_read_lock();
+	nfs_to->nfsd_net_put(net);
+	rcu_read_unlock();
+}
+
 static inline void nfs_to_nfsd_file_put_local(struct nfsd_file *localio)
 {
 	/*
-	 * Once reference to nfsd_serv is dropped, NFSD could be
-	 * unloaded, so ensure safe return from nfsd_file_put_local()
-	 * by always taking RCU.
+	 * Must not hold RCU otherwise nfsd_file_put() can easily trigger:
+	 * "Voluntary context switch within RCU read-side critical section!"
+	 * by scheduling deep in underlying filesystem (e.g. XFS).
 	 */
-	rcu_read_lock();
-	nfs_to->nfsd_file_put_local(localio);
-	rcu_read_unlock();
+	struct net *net = nfs_to->nfsd_file_put_local(localio);
+
+	nfs_to_nfsd_net_put(net);
 }
 
 #else   /* CONFIG_NFS_LOCALIO */
