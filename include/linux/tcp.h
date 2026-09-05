@@ -257,7 +257,9 @@ struct tcp_sock {
 	u8	compressed_ack;
 	u8	dup_ack_counter:2,
 		tlp_retrans:1,	/* TLP is a retransmission */
-		unused:5;
+		fast_ack_mode:2, /* which fast ack mode ? */
+		tlp_orig_data_app_limited:1, /* app-limited before TLP rtx? */
+		unused:2;
 	u32	chrono_start;	/* Start time in jiffies of a TCP chrono */
 	u32	chrono_stat[3];	/* Time in jiffies for chrono_stat stats */
 	u8	chrono_type:2,	/* current chronograph type */
@@ -377,6 +379,14 @@ struct tcp_sock {
 				 * Total data bytes retransmitted
 				 */
 	u32	total_retrans;	/* Total retransmits for entire connection */
+	u32	rto_stamp;	/* Start time (ms) of last CA_Loss recovery */
+	u16	total_rto;	/* Total number of RTO timeouts, including
+				 * SYN/SYN-ACK and recurring timeouts.
+				 */
+	u16	total_rto_recoveries;	/* Total number of RTO recoveries,
+					 * including any unfinished recovery.
+					 */
+	u32	total_rto_time;	/* ms spent in (completed) RTO recoveries. */
 
 	u32	urg_seq;	/* Seq of received urgent pointer */
 	unsigned int		keepalive_time;	  /* time before keep alive takes place */

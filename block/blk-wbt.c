@@ -165,9 +165,9 @@ static void wb_timestamp(struct rq_wb *rwb, unsigned long *var)
  */
 static bool wb_recent_wait(struct rq_wb *rwb)
 {
-	struct bdi_writeback *wb = &rwb->rqos.disk->bdi->wb;
+	struct backing_dev_info *bdi = rwb->rqos.disk->bdi;
 
-	return time_before(jiffies, wb->dirty_sleep + HZ);
+	return time_before(jiffies, bdi->last_bdp_sleep + HZ);
 }
 
 static inline struct rq_wait *get_rq_wait(struct rq_wb *rwb,
@@ -738,14 +738,8 @@ EXPORT_SYMBOL_GPL(wbt_enable_default);
 
 u64 wbt_default_latency_nsec(struct request_queue *q)
 {
-	/*
-	 * We default to 2msec for non-rotational storage, and 75msec
-	 * for rotational storage.
-	 */
-	if (blk_queue_nonrot(q))
-		return 2000000ULL;
-	else
-		return 75000000ULL;
+	/* XanMod defaults to 1.5msec for any type of storage */
+	return 1500000ULL;
 }
 
 static int wbt_data_dir(const struct request *rq)
